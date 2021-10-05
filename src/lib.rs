@@ -12,6 +12,7 @@ use fst::{set::StreamBuilder, Automaton, IntoStreamer, Set, Streamer};
 use radix_trie::{Trie, TrieKey};
 use rand::{prelude::ThreadRng, thread_rng};
 
+pub mod async_cw;
 mod cw;
 mod dawg;
 

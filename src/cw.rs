@@ -625,7 +625,7 @@ mod tests {
 
     use super::*;
     fn get_set() -> Set<Vec<u8>> {
-        let file = File::open("usa.txt").unwrap();
+        let file = File::open("dataset/english3.txt").unwrap();
 
         let mut rng = WyRand::new();
 
@@ -635,59 +635,61 @@ mod tests {
             .filter_map(|l| l.ok().map(|s| s.to_lowercase()))
             .collect::<BTreeSet<String>>();
         // let file = File::open("google-10000-english-no-swears.txt").unwrap();
-        let file = File::open("pokemon.txt").unwrap();
+        let file = File::open("dataset/pokemon.txt").unwrap();
 
         let buf = BufReader::new(file);
-        bh.extend(buf.lines().filter_map(|l| l.ok().map(|s| s.to_lowercase())));
+        // bh.extend(buf.lines().filter_map(|l| l.ok().map(|s| s.to_lowercase())));
 
         let set = fst::Set::from_iter(bh.iter()).unwrap();
         set
     }
 
     fn solve(params: &Parameters) {
-        let solver = Solver::new_seed(&params, 10289213);
+        let solver = Solver::new(&params);
 
         let instant = Instant::now();
-        println!("beginning solve");
+        // println!("beginning solve");
 
         let solution = solver.solve().unwrap();
         let elapsed = instant.elapsed();
         println!("time: {:?}", elapsed);
 
-        for word in params.word_to_board.iter() {
-            let mut word_chars = AsciiString::new();
-            for word_idx in word {
-                assert_eq!(solution[word_idx].len(), 1);
-                let char = solution[word_idx].iter().next().unwrap();
-                word_chars.push(AsciiChar::from_ascii(char as u8).unwrap());
-            }
-            println!("{}", word_chars);
-        }
+        // for word in params.word_to_board.iter() {
+        //     let mut word_chars = AsciiString::new();
+        //     for word_idx in word {
+        //         assert_eq!(solution[word_idx].len(), 1);
+        //         let char = solution[word_idx].iter().next().unwrap();
+        //         word_chars.push(AsciiChar::from_ascii(char as u8).unwrap());
+        //     }
+        //     println!("{}", word_chars);
+        // }
     }
     #[test]
     fn square_all_blank() {
         // env_logger::builder().is_test(true).try_init();
-        for num in 4..5 {
-            let dict = get_set();
-            let mut words = Vec::new();
-            for x in 0..num {
-                let mut word1 = Vec::new();
-                for z in 0..num {
-                    word1.push(x * num + z);
+        for _ in 0..100 {
+            for num in 5..6 {
+                let dict = get_set();
+                let mut words = Vec::new();
+                for x in 0..num {
+                    let mut word1 = Vec::new();
+                    for z in 0..num {
+                        word1.push(x * num + z);
+                    }
+
+                    words.push(word1);
+                    let mut word2 = Vec::new();
+                    for y in 0..num {
+                        word2.push(x + num * y)
+                    }
+
+                    words.push(word2);
                 }
 
-                words.push(word1);
-                let mut word2 = Vec::new();
-                for y in 0..num {
-                    word2.push(x + num * y)
-                }
+                let params = Parameters::new(words, dict);
 
-                words.push(word2);
+                solve(&params);
             }
-
-            let params = Parameters::new(words, dict);
-
-            solve(&params);
         }
     }
 
