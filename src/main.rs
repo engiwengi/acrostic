@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeSet,
     fs::File,
-    io::{BufRead, BufReader},
+    io::{stdin, stdout, BufRead, BufReader, Read, Write},
     time::Instant,
 };
 
@@ -9,8 +9,17 @@ use acrostic_cw::{async_cw, Parameters, Solver};
 use ascii::{AsciiChar, AsciiString};
 use env_logger::Env;
 
+fn pause() {
+    let mut stdout = stdout();
+    stdout.write_all(b"Press Enter to continue...").unwrap();
+    stdout.flush().unwrap();
+    stdin().read_exact(&mut [0]).unwrap();
+}
 fn main() {
-    let file = File::open("dataset/english3.txt").unwrap();
+    // pause();
+    // env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
+    let file =
+        File::open("C:/Users/Jono/Development/Personal/acrostic-cw/dataset/english3.txt").unwrap();
 
     let buf = BufReader::new(file);
     let bh = buf
@@ -39,14 +48,15 @@ fn main() {
 
     // let mut group = c.benchmark_group("5x5");
 
-    // for seed in (0..usize::MAX).step_by(usize::MAX / 100) {
-    let seed = 100;
-    let mut solver = async_cw::Solver::new_seed(&params, &dict, seed);
-
+    for seed in (0..usize::MAX).step_by(usize::MAX / 50) {
+        let mut solver = async_cw::Solver::new_seed(&params, &dict, seed as u64);
+        let now = Instant::now();
+        let board = solver.run().unwrap();
+        println!("{:?}", now.elapsed());
+    }
     // group.bench_function(format!("solve: {}", seed), |b| {
     //     b.iter(|| {
-    let board = solver.run().unwrap();
-    println!("{:?}", board)
+    // println!("{:?}", board)
     //     })
     // });
     // group.finish();

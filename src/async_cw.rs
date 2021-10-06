@@ -6,9 +6,11 @@ use std::{
 };
 
 use bevy_tasks::{AsyncComputeTaskPool, TaskPool, TaskPoolBuilder};
+use crossbeam::channel::{Receiver, Sender};
 use fst::{IntoStreamer, Set, Streamer};
 use log::info;
 use nanorand::{Rng, WyRand};
+use parking_lot::{Mutex, RwLock};
 use tinyset::{Set64, SetU32};
 use ustr::Ustr;
 use vec_map::VecMap;
@@ -136,9 +138,26 @@ fn test() {
     println!("{}", std::mem::size_of::<Set64<char>>());
 }
 
+pub struct Channel<T> {
+    sender: Sender<T>,
+    receiver: Receiver<T>,
+}
+
+impl<T> Channel<T> {
+    pub fn bounded(cap: usize) -> Self {
+        let (sender, receiver) = crossbeam::channel::bounded(cap);
+        Self { sender, receiver }
+    }
+
+    pub fn unbounded() -> Self {
+        let (sender, receiver) = crossbeam::channel::unbounded();
+        Self { sender, receiver }
+    }
+}
+
 pub struct Solver<'a> {
     parameters: &'a Parameters,
-    history: Vec<History>,
+    history: Mutex<Vec<History>>,
     board: Board, // current characters permitted on the board for each board index
     attempted_words: VecMap<Vec<Ustr>>, // words currently attempted for each word index
     selected_words: HashSet<Ustr>, // words selected for each word index
@@ -209,12 +228,12 @@ impl<'a> Solver<'a> {
         }
     }
     pub fn run(mut self) -> Result<Board, SolverError> {
-        self.history.push(History::Begin);
+        let _ = self.history.get_mut().push(History::Begin);
         self.minimize(Set64::from_iter(self.parameters.vertical_words()));
         info!("starting board: \n{:?}", self.board);
         info!("parameters: {:?}", self.parameters.word_to_board);
         loop {
-            info!("Possible words: \n{:?}", self.possible_words);
+            // info!("Possible words: \n{:?}", self.possible_words);
             match self.state {
                 State::SelectWord => self.select_word(),
                 State::BackTracking => self.backtrack(),
@@ -226,28 +245,11 @@ impl<'a> Solver<'a> {
 
     // returns word index
     fn most_constrained(&self) -> Option<usize> {
-        let mut ret: Option<(usize, usize, usize)> = None;
-        for (word_index, word) in self.parameters.word_to_board.iter().enumerate() {
-            let mut remaining_letters = 0;
-            for board_index in word {
-                remaining_letters += self.board.board[board_index].len();
-            }
-            if remaining_letters > word.len() {
-                ret = if let Some((len, letters, i)) = ret.take() {
-                    match (letters as f32 / len as f32)
-                        .partial_cmp(&(remaining_letters as f32 / word.len() as f32))
-                        .map(|o| o.then(len.cmp(&word.len())))
-                    {
-                        Some(Ordering::Less) => Some((word.len(), remaining_letters, word_index)),
-                        _ => Some((len, letters, i)),
-                    }
-                } else {
-                    Some((word.len(), remaining_letters, word_index))
-                }
-            }
-        }
-
-        ret.map(|(_, _, i)| i)
+        self.possible_words
+            .iter()
+            .filter(|(_, remaining)| !remaining.is_empty())
+            .min_by_key(|(_, remaining_words)| remaining_words.len())
+            .map(|(word_index, _)| word_index)
     }
 
     fn select_word(&mut self) {
@@ -269,27 +271,24 @@ impl<'a> Solver<'a> {
             .rand
             .generate_range(0..self.possible_words[word_index].len());
 
-        self.possible_words[word_index].swap(0, chosen_word_index);
+        let chosen_word = self.possible_words[word_index].swap_remove(chosen_word_index);
 
-        self.history.push(History::SelectedWord {
+        let _ = self.history.get_mut().push(History::SelectedWord {
             word_index,
-            word: self.possible_words[word_index][0],
+            word: chosen_word,
         });
 
-        info!(
-            "Chosen word: {}",
-            self.possible_words[word_index][0].as_str()
-        );
-        let denied_words = self.possible_words[word_index].split_off(1);
+        info!("Chosen word: {}", chosen_word.as_str());
+
+        let denied_words =
+            std::mem::replace(&mut self.possible_words[word_index], vec![chosen_word]);
+
         if !denied_words.is_empty() {
-            self.history.push(History::DeniedWords {
+            let _ = self.history.get_mut().push(History::DeniedWords {
                 word_index,
                 denied_word: denied_words,
             });
         }
-        // for denied_word in .drain(1..) {
-
-        // }
 
         let mut words = Set64::<usize>::with_capacity(1);
         words.insert(word_index);
@@ -297,7 +296,9 @@ impl<'a> Solver<'a> {
     }
 
     fn backtrack(&mut self) {
-        while let Some(history) = self.history.pop() {
+        info!("backtracking");
+        while let Some(history) = self.history.get_mut().pop() {
+            info!("{:?}", history);
             match history {
                 History::Minimized {
                     board_index,
@@ -342,7 +343,7 @@ impl<'a> Solver<'a> {
                     word_index,
                     mut denied_word,
                 } => {
-                    info!("Undenying words for word index: {}", word_index);
+                    // info!("Undenying words for word index: {}", word_index);
                     self.possible_words[word_index].append(&mut denied_word);
                 }
             }
@@ -361,8 +362,8 @@ impl<'a> Solver<'a> {
                     break;
                 }
             };
-            info!("New board: \n{:?}", self.board);
-            info!("Possible words: \n{:?}", self.possible_words);
+            // info!("New board: \n{:?}", self.board);
+            // info!("Possible words: \n{:?}", self.possible_words);
         }
     }
     fn minimize_words(
@@ -385,6 +386,7 @@ impl<'a> Solver<'a> {
                 let board_indexes = &self.parameters.word_to_board[word_index];
                 let board = &self.board;
                 let board_to_word = &self.parameters.board_to_word;
+                let history = &self.history;
                 scope.spawn(async move {
                     let mut words_to_propogate = Set64::<usize>::new();
                     let mut board_updates = Vec::new();
@@ -394,10 +396,18 @@ impl<'a> Solver<'a> {
                     let chars =
                         board.determine_chars(board_indexes, possible_words, &mut denied_words);
 
+                    if !denied_words.is_empty() {
+                        info!("denying words at index: {}", word_index);
+                        let _ = history.lock().push(History::DeniedWords {
+                            word_index,
+                            denied_word: denied_words,
+                        });
+                    }
+
                     for (board_index, new_chars) in board_indexes.iter().copied().zip(chars) {
                         if new_chars.is_empty() {
                             // this can be done a better way
-                            return (words_to_propogate, board_updates, denied_words, word_index);
+                            return (words_to_propogate, board_updates, word_index);
                         }
 
                         if board
@@ -415,7 +425,7 @@ impl<'a> Solver<'a> {
                         }
                     }
 
-                    (words_to_propogate, board_updates, denied_words, word_index)
+                    (words_to_propogate, board_updates, word_index)
                 });
             }
         });
@@ -423,17 +433,7 @@ impl<'a> Solver<'a> {
         let mut next_word_indexes = None;
         let mut error = None;
 
-        for (set, board_updates, denied_words, word_index) in results {
-            // for denied_word in denied_words {
-            if !denied_words.is_empty() {
-                info!("denying words {:?} at index: {}", denied_words, word_index);
-                self.history.push(History::DeniedWords {
-                    word_index,
-                    denied_word: denied_words,
-                });
-            }
-            // }
-
+        for (set, board_updates, word_index) in results {
             // let mut selected_word = Some(String::new());
 
             for (board_index, new_chars) in board_updates {
@@ -448,7 +448,7 @@ impl<'a> Solver<'a> {
                         entry.insert(new_chars);
                     }
                     vec_map::Entry::Occupied(mut entry) => {
-                        self.history.push(History::Minimized {
+                        let _ = self.history.get_mut().push(History::Minimized {
                             board_index,
                             previous_state: entry.insert(new_chars),
                         });
@@ -465,7 +465,7 @@ impl<'a> Solver<'a> {
                 if !self.selected_words.insert(added_word) {
                     error = Some(SolverError::DuplicateWord)
                 } else {
-                    self.history.push(History::CompletedWord {
+                    let _ = self.history.get_mut().push(History::CompletedWord {
                         word: added_word,
                         word_index,
                     });
@@ -476,7 +476,6 @@ impl<'a> Solver<'a> {
             }
 
             // if let Some(selected_word) = selected_word {
-
             //     // self.history.push(History::AddedWord {  word_index });
             // }
 
@@ -514,7 +513,7 @@ impl Board {
 
         let mut i = 0;
         while i < possible_words.len() {
-            let word = possible_words[i].as_str();
+            let word = &possible_words[i];
             if word.chars().zip(board_indexes).all(|(char, board_index)| {
                 self.board
                     .get(*board_index)
