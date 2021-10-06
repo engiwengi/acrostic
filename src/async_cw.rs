@@ -194,6 +194,20 @@ impl<'a> Solver<'a> {
             pool: TaskPool::new(),
         }
     }
+
+    pub fn new_seed(parameters: &'a Parameters, dict: &Set<Vec<u8>>, seed: u64) -> Self {
+        Self {
+            parameters,
+            history: Default::default(),
+            board: Default::default(),
+            attempted_words: Default::default(),
+            selected_words: Default::default(),
+            possible_words: Self::get_possible_words(parameters, dict),
+            state: State::SelectWord,
+            rand: WyRand::new_seed(seed),
+            pool: TaskPool::new(),
+        }
+    }
     pub fn run(mut self) -> Result<Board, SolverError> {
         self.history.push(History::Begin);
         self.minimize(Set64::from_iter(self.parameters.vertical_words()));
@@ -484,7 +498,7 @@ impl<'a> Solver<'a> {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct Board {
     pub board: VecMap<Set64<char>>,
 }
