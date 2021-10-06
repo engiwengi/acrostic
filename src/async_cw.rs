@@ -1,11 +1,12 @@
 use std::{
     cmp::Ordering,
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fmt::{Debug, Write},
     iter::FromIterator,
 };
 
 use bevy_tasks::{AsyncComputeTaskPool, TaskPool, TaskPoolBuilder};
+use byte_set::ByteSet;
 use crossbeam::channel::{Receiver, Sender};
 use fst::{IntoStreamer, Set, Streamer};
 use log::info;
@@ -121,7 +122,7 @@ enum History {
     },
     Minimized {
         board_index: usize,
-        previous_state: Set64<char>,
+        previous_state: ByteSet,
     },
     SelectedWord {
         word_index: usize,
@@ -131,11 +132,6 @@ enum History {
         word: Ustr,
         word_index: usize,
     },
-}
-
-#[test]
-fn test() {
-    println!("{}", std::mem::size_of::<Set64<char>>());
 }
 
 pub struct Channel<T> {
@@ -160,7 +156,7 @@ pub struct Solver<'a> {
     history: Mutex<Vec<History>>,
     board: Board, // current characters permitted on the board for each board index
     attempted_words: VecMap<Vec<Ustr>>, // words currently attempted for each word index
-    selected_words: HashSet<Ustr>, // words selected for each word index
+    selected_words: HashMap<Ustr, usize>, // words selected for each word index
     possible_words: VecMap<Vec<Ustr>>, // possible words remaining for each word index
     state: State,
     rand: WyRand,
@@ -227,18 +223,17 @@ impl<'a> Solver<'a> {
             pool: TaskPool::new(),
         }
     }
-    pub fn run(mut self) -> Result<Board, SolverError> {
+    pub fn run(mut self) -> Result<HashMap<Ustr, usize>, SolverError> {
         let _ = self.history.get_mut().push(History::Begin);
         self.minimize(Set64::from_iter(self.parameters.vertical_words()));
-        info!("starting board: \n{:?}", self.board);
-        info!("parameters: {:?}", self.parameters.word_to_board);
         loop {
-            // info!("Possible words: \n{:?}", self.possible_words);
             match self.state {
                 State::SelectWord => self.select_word(),
                 State::BackTracking => self.backtrack(),
                 State::NoSolution(e) => return Err(e),
-                State::Solved => return Ok(self.board),
+                State::Solved => {
+                    return Ok(self.selected_words);
+                }
             }
         }
     }
@@ -260,13 +255,6 @@ impl<'a> Solver<'a> {
                 return;
             }
         };
-
-        info!("Selecting word at word index: {}", word_index);
-
-        info!(
-            "Available words to select: {}",
-            self.possible_words[word_index].len()
-        );
         let chosen_word_index = self
             .rand
             .generate_range(0..self.possible_words[word_index].len());
@@ -277,8 +265,6 @@ impl<'a> Solver<'a> {
             word_index,
             word: chosen_word,
         });
-
-        info!("Chosen word: {}", chosen_word.as_str());
 
         let denied_words =
             std::mem::replace(&mut self.possible_words[word_index], vec![chosen_word]);
@@ -296,34 +282,24 @@ impl<'a> Solver<'a> {
     }
 
     fn backtrack(&mut self) {
-        info!("backtracking");
         while let Some(history) = self.history.get_mut().pop() {
-            info!("{:?}", history);
             match history {
                 History::Minimized {
                     board_index,
                     previous_state,
                 } => {
-                    // info!("reverting minimization for board index: {}", board_index);
                     self.board.board[board_index] = previous_state;
                 }
                 History::SelectedWord { word, word_index } => {
-                    info!(
-                        "Reverting randomly selected word for word index: {}",
-                        word_index
-                    );
                     let attempted_words =
                         self.attempted_words.entry(word_index).or_insert(Vec::new());
                     if self.possible_words[word_index].len() > 1 {
                         attempted_words.push(word);
                         let s = self.possible_words[word_index].swap_remove(0);
-                        info!("removing {} from possible words for {}", s, word_index);
 
-                        // info!("setting state to select word");
                         self.state = State::SelectWord;
                         break;
                     } else {
-                        info!("No words remaining, backtracking");
                         self.possible_words[word_index].append(attempted_words);
                     }
                 }
@@ -332,10 +308,6 @@ impl<'a> Solver<'a> {
                     break;
                 }
                 History::CompletedWord { word, word_index } => {
-                    info!(
-                        "Undoing completed word: {} for word index: {}, adding back to possible words",
-                        word, word_index
-                    );
                     self.possible_words[word_index].push(word);
                     self.selected_words.remove(&word);
                 }
@@ -343,27 +315,20 @@ impl<'a> Solver<'a> {
                     word_index,
                     mut denied_word,
                 } => {
-                    // info!("Undenying words for word index: {}", word_index);
                     self.possible_words[word_index].append(&mut denied_word);
                 }
             }
         }
     }
     fn minimize(&mut self, mut words: Set64<usize>) {
-        // let mut words = Set64::from_iter(std::iter::once(word_index));
-
         while !words.is_empty() {
-            info!("Propogating board minimization to words: {:?}", words);
             words = match self.minimize_words(words, self.pool.clone()) {
                 Ok(words) => words,
                 Err(e) => {
-                    info!("Minimize error: {:?}", e);
                     self.state = State::BackTracking;
                     break;
                 }
             };
-            // info!("New board: \n{:?}", self.board);
-            // info!("Possible words: \n{:?}", self.possible_words);
         }
     }
     fn minimize_words(
@@ -397,7 +362,6 @@ impl<'a> Solver<'a> {
                         board.determine_chars(board_indexes, possible_words, &mut denied_words);
 
                     if !denied_words.is_empty() {
-                        info!("denying words at index: {}", word_index);
                         let _ = history.lock().push(History::DeniedWords {
                             word_index,
                             denied_word: denied_words,
@@ -434,15 +398,7 @@ impl<'a> Solver<'a> {
         let mut error = None;
 
         for (set, board_updates, word_index) in results {
-            // let mut selected_word = Some(String::new());
-
             for (board_index, new_chars) in board_updates {
-                // selected_word = selected_word.and_then(|mut s| {
-                //     let mut new_chars_iter = new_chars.iter();
-                //     s.push(new_chars_iter.next().unwrap());
-                //     Some(s).filter(|_| new_chars_iter.next().is_none())
-                // });
-
                 match self.board.board.entry(board_index) {
                     vec_map::Entry::Vacant(entry) => {
                         entry.insert(new_chars);
@@ -458,11 +414,7 @@ impl<'a> Solver<'a> {
 
             if self.possible_words[word_index].len() == 1 {
                 let added_word = self.possible_words[word_index].pop().unwrap();
-                info!(
-                    "Completed word: {} at word index: {}, removing from possible words",
-                    added_word, word_index
-                );
-                if !self.selected_words.insert(added_word) {
+                if self.selected_words.insert(added_word, word_index).is_some() {
                     error = Some(SolverError::DuplicateWord)
                 } else {
                     let _ = self.history.get_mut().push(History::CompletedWord {
@@ -474,10 +426,6 @@ impl<'a> Solver<'a> {
                 error = Some(SolverError::NoPossibleWords);
                 continue;
             }
-
-            // if let Some(selected_word) = selected_word {
-            //     // self.history.push(History::AddedWord {  word_index });
-            // }
 
             if let Some(mut previous) = next_word_indexes.replace(set) {
                 next_word_indexes = next_word_indexes.map(|s| {
@@ -499,7 +447,7 @@ impl<'a> Solver<'a> {
 
 #[derive(Default, Clone)]
 pub struct Board {
-    pub board: VecMap<Set64<char>>,
+    pub board: VecMap<ByteSet>,
 }
 
 impl Board {
@@ -508,18 +456,18 @@ impl Board {
         board_indexes: &[usize],
         possible_words: &mut Vec<Ustr>,
         denied_words: &mut Vec<Ustr>,
-    ) -> Vec<Set64<char>> {
-        let mut chars = vec![Set64::<char>::new(); board_indexes.len()];
+    ) -> Vec<ByteSet> {
+        let mut chars = vec![ByteSet::new(); board_indexes.len()];
 
         let mut i = 0;
         while i < possible_words.len() {
             let word = &possible_words[i];
-            if word.chars().zip(board_indexes).all(|(char, board_index)| {
+            if word.bytes().zip(board_indexes).all(|(char, board_index)| {
                 self.board
                     .get(*board_index)
                     .map_or(true, |s| s.contains(char))
             }) {
-                chars.iter_mut().zip(word.chars()).for_each(|(s, char)| {
+                chars.iter_mut().zip(word.bytes()).for_each(|(s, char)| {
                     let _ = s.insert(char);
                 });
                 i += 1;
@@ -536,7 +484,12 @@ impl Board {
 impl Debug for Board {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         for tile in &self.board {
-            writeln!(f, "{}: {}", tile.0, tile.1.iter().collect::<String>())?;
+            writeln!(
+                f,
+                "{}: {}",
+                tile.0,
+                tile.1.into_iter().map(|b| b as char).collect::<String>()
+            )?;
         }
         Ok(())
     }

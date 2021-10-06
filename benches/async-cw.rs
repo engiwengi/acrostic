@@ -49,6 +49,7 @@ fn async_cw_solve(c: &mut Criterion) {
         );
     });
 
+    let mut rand = WyRand::new_seed(1500);
     let params = async_cw::Parameters::new(words(4));
     group.bench_function("4x4", |b| {
         b.iter_batched(
@@ -58,6 +59,7 @@ fn async_cw_solve(c: &mut Criterion) {
         );
     });
 
+    let mut rand = WyRand::new_seed(1500);
     let params = async_cw::Parameters::new(words(5));
     group.bench_function("5x5", |b| {
         b.iter_batched(
