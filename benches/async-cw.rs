@@ -72,5 +72,67 @@ fn async_cw_solve(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, async_cw_solve);
+fn looping_tests(c: &mut Criterion) {
+    let mut group = c.benchmark_group("loop");
+
+    let vec: Vec<usize> = (0..100000).collect();
+    group.bench_function("iter loop twice", |b| {
+        b.iter_with_large_drop(|| {
+            let vec1 = vec
+                .iter()
+                .filter(|i| *i % 2 == 0)
+                .copied()
+                .collect::<Vec<usize>>();
+            let vec2 = vec
+                .iter()
+                .filter(|i| *i % 3 == 0)
+                .copied()
+                .collect::<Vec<usize>>();
+
+            (vec1, vec2)
+        });
+    });
+
+    group.bench_function("for loop once", |b| {
+        b.iter_with_large_drop(|| {
+            let mut vec1 = Vec::with_capacity(vec.len() / 2 + 1);
+            let mut vec2 = Vec::with_capacity(vec.len() / 3 + 1);
+
+            for i in &vec {
+                if i % 2 == 0 {
+                    vec1.push(*i);
+                }
+                if i % 3 == 0 {
+                    vec2.push(*i);
+                }
+            }
+
+            (vec1, vec2)
+        });
+    });
+
+    group.bench_function("for loop twice", |b| {
+        b.iter_with_large_drop(|| {
+            let mut vec1 = Vec::with_capacity(vec.len() / 2 + 1);
+            let mut vec2 = Vec::with_capacity(vec.len() / 3 + 1);
+
+            for i in &vec {
+                if i % 2 == 0 {
+                    vec1.push(*i);
+                }
+            }
+            for i in &vec {
+                if i % 3 == 0 {
+                    vec2.push(*i);
+                }
+            }
+
+            (vec1, vec2)
+        });
+    });
+
+    group.finish();
+}
+
+criterion_group!(benches, looping_tests);
 criterion_main!(benches);

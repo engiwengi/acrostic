@@ -1,30 +1,13 @@
-use std::{
-    cmp::Ordering,
-    collections::{HashMap, HashSet},
-    fmt::{Debug, Write},
-    iter::FromIterator,
-};
+use std::{collections::HashMap, fmt::Debug, iter::FromIterator};
 
-use bevy_tasks::{AsyncComputeTaskPool, TaskPool, TaskPoolBuilder};
+use bevy_tasks::TaskPool;
 use byte_set::ByteSet;
-use crossbeam::channel::{Receiver, Sender};
 use fst::{IntoStreamer, Set, Streamer};
-use log::info;
 use nanorand::{Rng, WyRand};
-use parking_lot::{Mutex, RwLock};
-use tinyset::{Set64, SetU32};
+use parking_lot::Mutex;
+use tinyset::Set64;
 use ustr::Ustr;
 use vec_map::VecMap;
-
-struct Dictionary {
-    all_words: Set<Vec<u8>>,
-    preferred_words: Set<Vec<u8>>,
-}
-
-enum Tile {
-    OneWord(usize),
-    TwoWords(usize, usize),
-}
 
 pub struct Parameters {
     pub word_to_board: Vec<Vec<usize>>, //TODO make this a Word instead of a vec of usize
@@ -58,43 +41,10 @@ impl Parameters {
     }
 
     fn is_vertical(board_indexes: &[usize]) -> bool {
-        let mut first = board_indexes[0];
-        let mut second = board_indexes[1];
+        let first = board_indexes[0];
+        let second = board_indexes[1];
         second != first + 1
     }
-
-    // fn board_indexes(&self, word_index: usize) -> impl Iterator<Item = usize> {
-    //     self.word_to_board2[word_index].iter(self.width)
-    // }
-
-    // fn all_words(&self) -> impl Iterator<Item = impl Iterator<Item = usize>> + '_ {
-    //     self.word_to_board2
-    //         .iter()
-    //         .map(move |word| word.iter(self.width))
-    // }
-}
-
-struct Word {
-    start: usize,
-    length: usize,
-    direction: Direction,
-}
-
-impl Word {
-    fn iter(&self, board_width: usize) -> impl Iterator<Item = usize> {
-        match self.direction {
-            Direction::Across => (self.start..self.start + self.length).step_by(1),
-            Direction::Down => {
-                (self.start..self.start + self.length * board_width).step_by(board_width)
-            }
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-enum Direction {
-    Across,
-    Down,
 }
 
 #[derive(Clone)]
@@ -118,7 +68,7 @@ enum History {
     Begin,
     DeniedWords {
         word_index: usize,
-        denied_word: Vec<Ustr>,
+        denied_words: Vec<Ustr>,
     },
     Minimized {
         board_index: usize,
@@ -126,29 +76,11 @@ enum History {
     },
     SelectedWord {
         word_index: usize,
-        word: Ustr,
     },
     CompletedWord {
         word: Ustr,
         word_index: usize,
     },
-}
-
-pub struct Channel<T> {
-    sender: Sender<T>,
-    receiver: Receiver<T>,
-}
-
-impl<T> Channel<T> {
-    pub fn bounded(cap: usize) -> Self {
-        let (sender, receiver) = crossbeam::channel::bounded(cap);
-        Self { sender, receiver }
-    }
-
-    pub fn unbounded() -> Self {
-        let (sender, receiver) = crossbeam::channel::unbounded();
-        Self { sender, receiver }
-    }
 }
 
 pub struct Solver<'a> {
@@ -261,18 +193,17 @@ impl<'a> Solver<'a> {
 
         let chosen_word = self.possible_words[word_index].swap_remove(chosen_word_index);
 
-        let _ = self.history.get_mut().push(History::SelectedWord {
-            word_index,
-            word: chosen_word,
-        });
+        self.history
+            .get_mut()
+            .push(History::SelectedWord { word_index });
 
         let denied_words =
             std::mem::replace(&mut self.possible_words[word_index], vec![chosen_word]);
 
         if !denied_words.is_empty() {
-            let _ = self.history.get_mut().push(History::DeniedWords {
+            self.history.get_mut().push(History::DeniedWords {
                 word_index,
-                denied_word: denied_words,
+                denied_words,
             });
         }
 
@@ -290,12 +221,13 @@ impl<'a> Solver<'a> {
                 } => {
                     self.board.board[board_index] = previous_state;
                 }
-                History::SelectedWord { word, word_index } => {
+                History::SelectedWord { word_index } => {
                     let attempted_words =
                         self.attempted_words.entry(word_index).or_insert(Vec::new());
                     if self.possible_words[word_index].len() > 1 {
-                        attempted_words.push(word);
+                        // selected word is always at index 0 of possible words
                         let s = self.possible_words[word_index].swap_remove(0);
+                        attempted_words.push(s);
 
                         self.state = State::SelectWord;
                         break;
@@ -313,9 +245,9 @@ impl<'a> Solver<'a> {
                 }
                 History::DeniedWords {
                     word_index,
-                    mut denied_word,
+                    mut denied_words,
                 } => {
-                    self.possible_words[word_index].append(&mut denied_word);
+                    self.possible_words[word_index].append(&mut denied_words);
                 }
             }
         }
@@ -324,7 +256,7 @@ impl<'a> Solver<'a> {
         while !words.is_empty() {
             words = match self.minimize_words(words, self.pool.clone()) {
                 Ok(words) => words,
-                Err(e) => {
+                Err(_e) => {
                     self.state = State::BackTracking;
                     break;
                 }
@@ -353,25 +285,27 @@ impl<'a> Solver<'a> {
                 let board_to_word = &self.parameters.board_to_word;
                 let history = &self.history;
                 scope.spawn(async move {
-                    let mut words_to_propogate = Set64::<usize>::new();
+                    let mut words_to_propagate = Set64::<usize>::new();
                     let mut board_updates = Vec::new();
-                    let mut denied_words = Vec::new();
                     // should be in parallel since word indexes must
 
-                    let chars =
-                        board.determine_chars(board_indexes, possible_words, &mut denied_words);
+                    let WordExploreResult {
+                        allowed_chars,
+                        denied_words,
+                    } = board.determine_chars(board_indexes, possible_words);
 
                     if !denied_words.is_empty() {
                         let _ = history.lock().push(History::DeniedWords {
                             word_index,
-                            denied_word: denied_words,
+                            denied_words,
                         });
                     }
 
-                    for (board_index, new_chars) in board_indexes.iter().copied().zip(chars) {
+                    for (board_index, new_chars) in board_indexes.iter().copied().zip(allowed_chars)
+                    {
                         if new_chars.is_empty() {
                             // this can be done a better way
-                            return (words_to_propogate, board_updates, word_index);
+                            return (words_to_propagate, board_updates, word_index);
                         }
 
                         if board
@@ -382,14 +316,14 @@ impl<'a> Solver<'a> {
                             board_updates.push((board_index, new_chars));
                             // self.board.board.insert(board_index, new_chars);
                             let _ = match board_to_word[board_index] {
-                                (i, _) if i != word_index => words_to_propogate.insert(i),
-                                (_, Some(i)) if i != word_index => words_to_propogate.insert(i),
+                                (i, _) if i != word_index => words_to_propagate.insert(i),
+                                (_, Some(i)) if i != word_index => words_to_propagate.insert(i),
                                 _ => true,
                             };
                         }
                     }
 
-                    (words_to_propogate, board_updates, word_index)
+                    (words_to_propagate, board_updates, word_index)
                 });
             }
         });
@@ -398,30 +332,28 @@ impl<'a> Solver<'a> {
         let mut error = None;
 
         for (set, board_updates, word_index) in results {
-            for (board_index, new_chars) in board_updates {
-                match self.board.board.entry(board_index) {
-                    vec_map::Entry::Vacant(entry) => {
-                        entry.insert(new_chars);
-                    }
-                    vec_map::Entry::Occupied(mut entry) => {
-                        let _ = self.history.get_mut().push(History::Minimized {
-                            board_index,
-                            previous_state: entry.insert(new_chars),
-                        });
-                    }
-                }
+            for (board_index, previous_state) in self.board.apply(board_updates.into_iter()) {
+                let _ = self.history.get_mut().push(History::Minimized {
+                    board_index,
+                    previous_state,
+                });
             }
 
             if self.possible_words[word_index].len() == 1 {
                 let added_word = self.possible_words[word_index].pop().unwrap();
-                if self.selected_words.insert(added_word, word_index).is_some() {
-                    error = Some(SolverError::DuplicateWord)
-                } else {
-                    let _ = self.history.get_mut().push(History::CompletedWord {
-                        word: added_word,
-                        word_index,
-                    });
-                }
+                match self.selected_words.entry(added_word) {
+                    std::collections::hash_map::Entry::Occupied(_) => {
+                        self.possible_words[word_index].push(added_word);
+                        error = Some(SolverError::DuplicateWord);
+                    }
+                    std::collections::hash_map::Entry::Vacant(vacant_entry) => {
+                        vacant_entry.insert(word_index);
+                        self.history.get_mut().push(History::CompletedWord {
+                            word: added_word,
+                            word_index,
+                        });
+                    }
+                };
             } else if self.possible_words[word_index].is_empty() {
                 error = Some(SolverError::NoPossibleWords);
                 continue;
@@ -451,13 +383,25 @@ pub struct Board {
 }
 
 impl Board {
+    fn apply<'a: 'i, 'i, I: 'i + Iterator<Item = (usize, ByteSet)>>(
+        &'a mut self,
+        i: I,
+    ) -> impl Iterator<Item = (usize, ByteSet)> + 'i {
+        i.filter_map(move |(i, charset)| match self.board.entry(i) {
+            vec_map::Entry::Vacant(e) => {
+                e.insert(charset);
+                None
+            }
+            vec_map::Entry::Occupied(mut e) => Some((i, e.insert(charset))),
+        })
+    }
     fn determine_chars(
         &self,
         board_indexes: &[usize],
         possible_words: &mut Vec<Ustr>,
-        denied_words: &mut Vec<Ustr>,
-    ) -> Vec<ByteSet> {
-        let mut chars = vec![ByteSet::new(); board_indexes.len()];
+    ) -> WordExploreResult {
+        let mut allowed_chars = vec![ByteSet::new(); board_indexes.len()];
+        let mut denied_words = Vec::new();
 
         let mut i = 0;
         while i < possible_words.len() {
@@ -467,9 +411,12 @@ impl Board {
                     .get(*board_index)
                     .map_or(true, |s| s.contains(char))
             }) {
-                chars.iter_mut().zip(word.bytes()).for_each(|(s, char)| {
-                    let _ = s.insert(char);
-                });
+                allowed_chars
+                    .iter_mut()
+                    .zip(word.bytes())
+                    .for_each(|(s, char)| {
+                        let _ = s.insert(char);
+                    });
                 i += 1;
             } else {
                 let denied_word = possible_words.swap_remove(i);
@@ -477,8 +424,16 @@ impl Board {
             }
         }
 
-        chars
+        WordExploreResult {
+            allowed_chars,
+            denied_words,
+        }
     }
+}
+
+struct WordExploreResult {
+    allowed_chars: Vec<ByteSet>,
+    denied_words: Vec<Ustr>,
 }
 
 impl Debug for Board {
@@ -497,29 +452,109 @@ impl Debug for Board {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use bevy_tasks::TaskPoolBuilder;
+
     use super::*;
 
     #[test]
     fn determine_chars_works() {
         let board = Board::default();
-        let ret = board.determine_chars(&[0, 1, 2], &mut vec![Ustr::from("tes")], &mut vec![]);
+        let WordExploreResult {
+            allowed_chars,
+            denied_words,
+        } = board.determine_chars(&[0, 1, 2], &mut vec![Ustr::from("tes")]);
 
-        for chars in ret {
+        for chars in allowed_chars {
             assert_eq!(chars.len(), 1)
         }
+        assert_eq!(denied_words.len(), 0);
     }
 
     #[test]
     fn determine_chars_works2() {
-        let board = Board::default();
-        let ret = board.determine_chars(
+        let mut board = Board::default();
+        let WordExploreResult {
+            allowed_chars,
+            denied_words: _,
+        } = board.determine_chars(&[0, 1, 2], &mut vec![Ustr::from("tes"), Ustr::from("sat")]);
+
+        assert_eq!(allowed_chars[0], ByteSet::from_iter(&[b't', b's']));
+        assert_eq!(allowed_chars[1], ByteSet::from_iter(&[b'e', b'a']));
+        assert_eq!(allowed_chars[2], ByteSet::from_iter(&[b's', b't']));
+
+        board.apply(allowed_chars.into_iter().enumerate()).count();
+
+        let WordExploreResult {
+            allowed_chars: _,
+            denied_words,
+        } = board.determine_chars(
             &[0, 1, 2],
-            &mut vec![Ustr::from("tes"), Ustr::from("sat")],
-            &mut vec![],
+            &mut vec![Ustr::from("tes"), Ustr::from("sat"), Ustr::from("den")],
         );
 
-        for chars in ret {
-            assert_eq!(chars.len(), 2)
-        }
+        assert_eq!(denied_words[0], Ustr::from("den"));
+    }
+
+    #[async_std::test]
+    async fn async_test() {
+        let task_pool = TaskPoolBuilder::new().num_threads(10).build();
+
+        let task1 = task_pool.spawn(async {
+            println!("spawned 1st task");
+            std::thread::sleep(Duration::from_secs(1));
+            println!("wasted 1 second on 1st task");
+            async_std::task::sleep(Duration::from_secs(1)).await;
+            println!("slept for 1 second");
+        });
+
+        let task2 = task_pool.spawn(async {
+            println!("spawned 2nd task");
+            async_std::task::sleep(Duration::from_secs(2)).await;
+            println!("slept for 2 second on 2nd task");
+        });
+
+        let task3 = task_pool.spawn(async {
+            println!("spawned 3rd task");
+            async_std::task::sleep(Duration::from_secs(3)).await;
+            println!("slept for 3 second on third task");
+        });
+
+        let task4 = task_pool.spawn(async {
+            println!("spawned 4th task");
+            async_std::task::sleep(Duration::from_secs(1)).await;
+            println!("slept for 1 second on fourth task");
+        });
+
+        let task5 = task_pool.spawn(async {
+            println!("spawned 5th task");
+            async_std::task::sleep(Duration::from_secs(1)).await;
+            println!("slept for 1 second on fifth task");
+        });
+
+        let task6 = task_pool.spawn(async {
+            println!("spawned 6th task");
+        });
+
+        let task7 = task_pool.spawn(async {
+            println!("spawned 7th task");
+            std::thread::sleep(Duration::from_secs(1));
+            println!("wasted 1 second on 7th task");
+        });
+
+        let task8 = task_pool.spawn(async {
+            println!("spawned 8th task");
+            std::thread::sleep(Duration::from_secs(1));
+            println!("wasted 1 second on 8th task");
+        });
+
+        let task9 = task_pool.spawn(async {
+            println!("spawned 9th task");
+            std::thread::sleep(Duration::from_secs(1));
+            println!("wasted 1 second on 9th task");
+        });
+
+        futures::join!(task1, task2, task3, task4, task5, task6, task7, task8, task9);
     }
 }

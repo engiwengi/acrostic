@@ -1,14 +1,11 @@
 use std::{
-    collections::{BTreeSet, HashMap},
-    fs::File,
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    fs::{File, OpenOptions},
     hash::Hash,
-    io::{stdin, stdout, BufRead, BufReader, Read, Write},
-    time::Instant,
+    io::{stdin, stdout, BufRead, BufReader, BufWriter, Read, Write},
 };
 
-use acrostic_cw::{async_cw, Parameters, Solver};
-use ascii::{AsciiChar, AsciiString};
-use env_logger::Env;
+use acrostic_cw::async_cw;
 use ustr::Ustr;
 
 fn pause() {
@@ -18,21 +15,50 @@ fn pause() {
     stdin().read_exact(&mut [0]).unwrap();
 }
 fn main() {
-    pause();
-    // env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
+    // pause();
     let file = File::open(
-        "C:/Users/Jono/Development/Personal/acrostic-cw/dataset/google-10000-english-no-swears.txt",
+        "C:/Users/Jono/Development/Personal/acrostic-cw/dataset/archive/unigram_freq_new.csv",
     )
     .unwrap();
 
+    let file2 =
+        File::open("C:/Users/Jono/Development/Personal/acrostic-cw/dataset/english3.txt").unwrap();
+
     let buf = BufReader::new(file);
+    let buf2 = BufReader::new(file2);
     let bh = buf
         .lines()
-        .filter_map(|l| l.ok().map(|s| s.to_lowercase()))
-        .collect::<BTreeSet<String>>();
-    let dict = fst::Set::from_iter(bh.iter()).unwrap();
+        .filter_map(|l| {
+            l.ok().and_then(|s| {
+                s.split_once(',')
+                    .map(|(s, i)| (s.to_owned(), i.parse::<usize>().unwrap()))
+            })
+        })
+        .collect::<HashMap<String, usize>>();
+    // let commonwords = buf2
+    //     .lines()
+    //     .filter_map(|l| l.ok())
+    //     .collect::<BTreeSet<String>>();
+    // let newfile = OpenOptions::new()
+    //     .truncate(true)
+    //     .write(true)
+    //     .open("C:/Users/Jono/Development/Personal/acrostic-cw/dataset/archive/unigram_freq_new.csv")
+    //     .unwrap();
+    // let mut writer = BufWriter::new(newfile);
+    // for (c, s) in bh
+    //     .clone()
+    //     .into_iter()
+    //     .filter(|(s, _)| s.len() == 6 && commonwords.contains(s))
+    //     .map(|(s, i)| (i, s))
+    //     .collect::<BTreeMap<usize, String>>()
+    // {
+    //     writer
+    //         .write_all(format!("{},{}\n", s, c).as_bytes())
+    //         .unwrap();
+    // }
+    let dict = fst::Set::from_iter(bh.keys().collect::<BTreeSet<&String>>()).unwrap();
     let mut words = Vec::new();
-    let num = 4;
+    let num = 6;
     for x in 0..num {
         let mut word1 = Vec::new();
         for z in 0..num {
@@ -50,36 +76,33 @@ fn main() {
 
     let params = async_cw::Parameters::new(words);
 
-    // let mut group = c.benchmark_group("5x5");
-
     let mut solved_words: HashMap<Ustr, usize> = HashMap::new();
     let mut solutions: HashMap<Ustr, HashMap<Ustr, usize>> = HashMap::new();
 
-    for seed in (0..usize::MAX).step_by(usize::MAX / 10000) {
-        let mut solver = async_cw::Solver::new_seed(&params, &dict, seed as u64);
-        // let now = Instant::now();
-        let mut board = solver.run().unwrap();
-        // println!("{:?}", now.elapsed());
+    let step = usize::MAX / 50;
 
-        for word in board.iter() {
-            *solved_words.entry(*word.0).or_default() += 1;
-            solutions.insert(*word.0, board.clone());
+    let mut best_boards = BTreeMap::new();
+    println!("{}", step);
+
+    for seed in (0..usize::MAX).step_by(step) {
+        let solver = async_cw::Solver::new_seed(&params, &dict, seed as u64);
+        if let Ok(board) = solver.run() {
+            let mut score = 0;
+
+            for word in board.iter() {
+                *solved_words.entry(*word.0).or_default() += 1;
+                score += (*bh.get(word.0.as_str()).unwrap_or(&0) as f32)
+                    .log2()
+                    .round() as u32;
+                solutions.insert(*word.0, board.clone());
+            }
+
+            println!("score: {}\nboard: {:?}", score, board);
+            best_boards.insert(score, board);
         }
     }
 
-    let mut solved_words = solved_words.into_iter().collect::<Vec<(Ustr, usize)>>();
-    solved_words.sort_by(|(_, q1), (_, q2)| q2.cmp(q1));
-    for (word, q) in solved_words.iter() {
-        println!("{}: {}", word, q);
+    for (score, board) in best_boards {
+        println!("score: {}\nboard: {:?}", score, board);
     }
-
-    let (last, _) = solved_words.pop().unwrap();
-    let least_common_solution = solutions.get(&last).unwrap();
-    println!("{:?}", least_common_solution);
-    // group.bench_function(format!("solve: {}", seed), |b| {
-    //     b.iter(|| {
-    // println!("{:?}", board)
-    //     })
-    // });
-    // group.finish();
 }
