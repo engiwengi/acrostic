@@ -1,39 +1,21 @@
 [package]
 name    = "acrostic-cw"
 version = "0.1.0"
-edition = "2018"
+edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
-[dev-dependencies]
-criterion = "0.3"
-
-[[bench]]
-name    = "async-cw"
-harness = false
-
 [dependencies]
-ascii       = "1.0"
-daggy       = "0.7"
-radix_trie  = "0.2"
 fst         = "0.4"
-ustr        = "0.8"
+ustr        = "0.9"
 vec_map     = "0.8"
 rand        = "0.8"
-wildmatch   = "2.1"
-enumset     = "1.0"
-fastrand    = "1.5"
-nanorand    = "0.6"
-env_logger  = "0.9"
-log         = "0.4"
+nanorand    = "0.7"
 tinyset     = "0.4"
-bevy_tasks  = "0.5"
-crossbeam   = "0.8"
-parking_lot = "0.11"
+parking_lot = "0.12"
 byte_set    = "0.1"
-tokio       = { version = "1.12", features = ["time", "macros", "rt-multi-thread"] }
-async-std   = { version = "1.10", features = ["attributes"] }
-futures     = "0.3"
+rayon = "1.7.0"
+atomic_bitfield = "0.1.0"
 
 [profile.release]
 debug = true
